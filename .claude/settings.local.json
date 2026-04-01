@@ -1,0 +1,26 @@
+{
+  "allowedTools": [
+    "Bash(git *)",
+    "Bash(python3 *)",
+    "Bash(docker compose *)",
+    "Bash(docker exec *)",
+    "Bash(docker logs *)",
+    "Bash(ssh *)",
+    "Bash(scp *)",
+    "Bash(cat *)",
+    "Bash(tail *)",
+    "Bash(grep *)",
+    "Bash(crontab -l)",
+    "Bash(systemctl status *)",
+    "Bash(systemctl restart *)",
+    "Edit(/home/guest74-linux/mother-scripts/*)",
+    "Edit(/home/guest74-linux/openclaw/*)",
+    "Edit(/home/guest74-linux/skywise/*)"
+  ],
+  "denyTools": [
+    "Bash(docker-compose *)",
+    "Bash(python *)",
+    "Bash(rm -rf *)",
+    "Bash(git push *)"
+  ]
+}
