@@ -256,6 +256,21 @@ def check_strategy_health():
     from datetime import timezone
     VPS = "root@5.78.179.50"
     HEALTH_FILE = "/home/node/.openclaw/workspace/memory/scan-health-axis_pms.json"
+
+    # Also check Options Bot local health file
+    OPTIONS_HEALTH_FILE = "/home/guest74-linux/options_bot/scan-health-options.json"
+    try:
+        with open(OPTIONS_HEALTH_FILE, 'r') as f:
+            import json as _json
+            options_health = _json.load(f)
+        last_scan = options_health.get("last_scan_utc", "unknown")
+        status = options_health.get("status", "unknown")
+        if status.lower() not in ("ok", "healthy"):
+            discord(f"OPTIONS BOT HEALTH - Status: {status} | Last scan: {last_scan}", 0xffa500)
+    except FileNotFoundError:
+        discord("OPTIONS BOT HEALTH - scan-health-options.json not found", 0xffa500)
+    except Exception as e:
+        discord(f"OPTIONS BOT HEALTH - Failed to read health file: {e}", 0xffa500)
     NOW = datetime.now(timezone.utc)
 
     st = load()
