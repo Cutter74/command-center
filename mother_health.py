@@ -279,7 +279,7 @@ def check_strategy_health():
     try:
         result = subprocess.run(
             ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-             VPS, "docker", "exec", "repo-openclaw-gateway-1", "cat", HEALTH_FILE],
+             VPS, "cat", HEALTH_FILE],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode != 0 or not result.stdout.strip():
@@ -300,7 +300,7 @@ def check_strategy_health():
 
     if scan_time_str:
         try:
-            scan_time = datetime.strptime(scan_time_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            scan_time = datetime.fromisoformat(scan_time_str.replace("Z", "+00:00"))
             hours_since = round((NOW - scan_time).total_seconds() / 3600, 1)
         except:
             scan_time = None
