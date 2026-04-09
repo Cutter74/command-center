@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import subprocess, json, urllib.request, urllib.error, time, os, sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 WEBHOOK = "https://discord.com/api/webhooks/1474871331626680522/jX3Js_uSqH-r-OGgNoWt1QrMSxyHqWoFxUqcEQx1zTnYon2MeJ-EsW19ghKxZi9RAaWS"
 N8N_REMEDIATION = "https://n8n.srv1242671.hstgr.cloud/webhook/mother-remediation"
@@ -9,16 +9,17 @@ SERVICES = [
     ("OpenClaw Local", "http://localhost:18789", 5),
 ]
 
-# VPS services checked via SSH docker inspect, not tunnels
+VPS_HOST = "root@5.78.179.50"
 VPS_CONTAINERS = [
-    ("n8n VPS", "root@5.78.179.50", "n8n-n8n-1"),
-    ("OpenClaw VPS", "root@5.78.179.50", "repo-openclaw-gateway-1"),
+    ("n8n VPS", VPS_HOST, "n8n-n8n-1"),
+    ("OpenClaw VPS", VPS_HOST, "repo-openclaw-gateway-1"),
 ]
 CONTAINERS = ["openclaw-openclaw-gateway-1"]
 STATE = os.path.expanduser("~/.openclaw/mother_health_state.json")
 
 # How many consecutive failures before triggering remediation
 STALL_TRIGGER_COUNT = 3
+
 
 def ping(name, url, t):
     try:
@@ -30,62 +31,166 @@ def ping(name, url, t):
     except Exception as e:
         return (name, 0, 0, str(e))
 
+
+def format_uptime(started_at_str):
+    """Convert Docker StartedAt timestamp to a human-readable uptime string."""
+    if not started_at_str or started_at_str.startswith("0001-"):
+        return "n/a"
+    try:
+        # Truncate sub-second precision; Docker gives nanoseconds
+        s = started_at_str[:19] + "+00:00"
+        started = datetime.fromisoformat(s)
+        delta = datetime.now(timezone.utc) - started
+        d, rem = divmod(int(delta.total_seconds()), 86400)
+        h, rem = divmod(rem, 3600)
+        m = rem // 60
+        if d > 0:
+            return f"{d}d {h}h"
+        elif h > 0:
+            return f"{h}h {m}m"
+        else:
+            return f"{m}m"
+    except:
+        return "?"
+
+
 def docker_check():
+    """Check local Docker containers. Returns list of (name, status, restarts, started_at)."""
     res = []
+    fmt = '{"s":"{{.State.Status}}","r":{{.RestartCount}},"t":"{{.State.StartedAt}}"}'
     for c in CONTAINERS:
         try:
-            o = subprocess.run(["docker","inspect","--format",'{"s":"{{.State.Status}}","r":{{.RestartCount}}}',c], capture_output=True, text=True, timeout=10)
+            o = subprocess.run(
+                ["docker", "inspect", "--format", fmt, c],
+                capture_output=True, text=True, timeout=10
+            )
             if o.returncode != 0:
-                res.append((c,"not found",0)); continue
+                res.append((c, "not found", 0, None))
+                continue
             d = json.loads(o.stdout.strip())
-            res.append((c, d["s"], d["r"]))
+            res.append((c, d["s"], d["r"], d.get("t")))
         except:
-            res.append((c,"error",0))
+            res.append((c, "error", 0, None))
     return res
 
 
 def vps_docker_check():
+    """Check VPS Docker containers via SSH. Returns list of (name, status, restarts, started_at)."""
     res = []
+    fmt = '{"s":"{{.State.Status}}","r":{{.RestartCount}},"t":"{{.State.StartedAt}}"}'
     for name, host, container in VPS_CONTAINERS:
         try:
+            remote_cmd = f"docker inspect '--format={fmt}' {container}"
             out = subprocess.run(
                 ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
-                 "-o", "ConnectTimeout=10", host,
-                 "docker inspect --format={{.State.Status}} " + container],
+                 "-o", "ConnectTimeout=10", host, remote_cmd],
                 capture_output=True, text=True, timeout=20
             )
-            status = out.stdout.strip()
-            res.append((name, "running" if status == "running" else (status or "not found")))
+            if out.returncode != 0 or not out.stdout.strip():
+                res.append((name, "not found", 0, None))
+                continue
+            d = json.loads(out.stdout.strip())
+            res.append((name, d["s"], d["r"], d.get("t")))
         except Exception as e:
-            res.append((name, "error: " + str(e)))
+            res.append((name, "error: " + str(e)[:60], 0, None))
     return res
 
+
 def disk_check():
+    """Check local disk usage. Returns [(mount, pct)]."""
     res = []
     try:
-        o = subprocess.run(["df","--output=target,pcent","/"], capture_output=True, text=True, timeout=10)
+        o = subprocess.run(["df", "--output=target,pcent", "/"], capture_output=True, text=True, timeout=10)
         for line in o.stdout.strip().split("\n")[1:]:
             p = line.split()
-            if len(p) >= 2: res.append((p[0], int(p[1].replace("%",""))))
+            if len(p) >= 2:
+                res.append((p[0], int(p[1].replace("%", ""))))
     except:
         res.append(("/", -1))
     return res
 
+
+def vps_disk_check():
+    """Check VPS disk usage via SSH. Returns [(mount, pct)]."""
+    try:
+        out = subprocess.run(
+            ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+             "-o", "ConnectTimeout=10", VPS_HOST, "df --output=target,pcent /"],
+            capture_output=True, text=True, timeout=20
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return [("/", -1)]
+        res = []
+        for line in out.stdout.strip().split("\n")[1:]:
+            p = line.split()
+            if len(p) >= 2:
+                try:
+                    res.append((p[0], int(p[1].replace("%", ""))))
+                except:
+                    pass
+        return res if res else [("/", -1)]
+    except:
+        return [("/", -1)]
+
+
 def load():
     try:
-        with open(STATE) as f: return json.load(f)
-    except: return {"issues":[],"restarts":{},"tunnel_failures":{},"stall_counts":{}}
+        with open(STATE) as f:
+            return json.load(f)
+    except:
+        return {"issues": "", "restarts": {}, "restarts_vps": {}, "tunnel_failures": {}, "stall_counts": {}}
+
 
 def save(st):
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
-    with open(STATE,"w") as f: json.dump(st, f)
+    with open(STATE, "w") as f:
+        json.dump(st, f, indent=2)
+
 
 def discord(msg, color=0x00ff00):
+    """Send a simple embed (description only). Used for ad-hoc alerts and heartbeat."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    body = json.dumps({"embeds":[{"title":"MOTHER Health Check","description":msg,"color":color,"footer":{"text":"Cutter74-Linux | "+now}}]}).encode()
-    req = urllib.request.Request(WEBHOOK, data=body, headers={"Content-Type":"application/json","User-Agent":"Mother-HealthCheck/1.0"}, method="POST")
-    try: urllib.request.urlopen(req, timeout=10)
-    except Exception as e: print("Webhook failed:", e)
+    body = json.dumps({
+        "embeds": [{
+            "title": "MOTHER Health Check",
+            "description": msg,
+            "color": color,
+            "footer": {"text": "Cutter74-Linux | " + now}
+        }]
+    }).encode()
+    req = urllib.request.Request(
+        WEBHOOK, data=body,
+        headers={"Content-Type": "application/json", "User-Agent": "Mother-HealthCheck/1.0"},
+        method="POST"
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        print("Webhook failed:", e)
+
+
+def discord_rich(title, fields, color=0x00cc44, description=None):
+    """Send a rich Discord embed with structured fields and a timestamp footer."""
+    embed = {
+        "title": title,
+        "color": color,
+        "fields": fields,
+        "footer": {"text": "Cutter74-Linux"},
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if description:
+        embed["description"] = description
+    body = json.dumps({"embeds": [embed]}).encode()
+    req = urllib.request.Request(
+        WEBHOOK, data=body,
+        headers={"Content-Type": "application/json", "User-Agent": "Mother-HealthCheck/1.0"},
+        method="POST"
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        print("Webhook failed:", e)
+
 
 def trigger_remediation(trigger_type, service_name, alert_type, details=None):
     """Fire the n8n remediation pipeline webhook."""
@@ -111,38 +216,44 @@ def trigger_remediation(trigger_type, service_name, alert_type, details=None):
         print(f"Remediation webhook failed: {e}")
         return False
 
+
 def is_tunnel_service(name):
-    """VPS services are reached via SSH tunnel — DOWN may mean tunnel not up, not service down."""
+    """VPS services are reached via SSH tunnel — DOWN may mean tunnel not up."""
     return name in ("n8n VPS", "OpenClaw VPS")
+
 
 def auto_repair(name, status):
     """Try to fix common issues. Returns (fixed, message)"""
     if status in ("exited", "not found", "dead", "created"):
         try:
-            out = subprocess.run(["docker","start",name], capture_output=True, text=True, timeout=30)
+            out = subprocess.run(["docker", "start", name], capture_output=True, text=True, timeout=30)
             if out.returncode == 0:
                 time.sleep(10)
-                check = subprocess.run(["docker","inspect","--format","{{.State.Status}}",name], capture_output=True, text=True, timeout=10)
+                check = subprocess.run(
+                    ["docker", "inspect", "--format", "{{.State.Status}}", name],
+                    capture_output=True, text=True, timeout=10
+                )
                 new_status = check.stdout.strip()
                 if new_status == "running":
-                    return (True, "Auto-restarted "+name+" successfully")
+                    return (True, "Auto-restarted " + name + " successfully")
                 else:
-                    return (False, "Tried to restart "+name+" but status is "+new_status)
+                    return (False, "Tried to restart " + name + " but status is " + new_status)
             else:
-                return (False, "Restart command failed for "+name+": "+out.stderr.strip())
+                return (False, "Restart command failed for " + name + ": " + out.stderr.strip())
         except Exception as e:
-            return (False, "Repair attempt failed for "+name+": "+str(e))
+            return (False, "Repair attempt failed for " + name + ": " + str(e))
     return (False, None)
 
+
 def setup_tunnels():
-    """Open SSH tunnels to VPS services via Tailscale"""
+    """Open SSH tunnels to VPS services"""
     tunnels = []
     try:
         t1 = subprocess.Popen([
             "ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
             "-N", "-L", "15678:127.0.0.1:5678",
             "-L", "28789:127.0.0.1:28789",
-            "root@5.78.179.50"
+            VPS_HOST
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         tunnels.append(t1)
         time.sleep(2)
@@ -150,78 +261,138 @@ def setup_tunnels():
         print("Tunnel setup failed:", e)
     return tunnels
 
+
 def teardown_tunnels(tunnels):
     for t in tunnels:
-        try: t.terminate()
-        except: pass
+        try:
+            t.terminate()
+        except:
+            pass
 
 
 def run():
     st = load()
-    bad, ok = [], []
     tunnel_failures = st.get("tunnel_failures", {})
+    has_issues = False
+    has_warnings = False
+
+    # ── LOCAL: Cutter74 ─────────────────────────────────────────────
+    local_lines = []
 
     for name, url, t in SERVICES:
         n, status, ms, err = ping(name, url, t)
         if status == 200:
-            ok.append("**"+n+"** 200 OK ("+str(ms)+"ms)")
-            # Clear consecutive failure count on success
+            local_lines.append(f"✅ **{n}** — 200 OK ({ms}ms)")
             tunnel_failures[name] = 0
         else:
-            # FIX: VPS services go through SSH tunnels which may not be up.
-            # Only report DOWN after STALL_TRIGGER_COUNT consecutive failures.
             if is_tunnel_service(name):
                 tunnel_failures[name] = tunnel_failures.get(name, 0) + 1
                 count = tunnel_failures[name]
                 if count >= STALL_TRIGGER_COUNT:
-                    bad.append("**"+n+"** DOWN ("+str(count)+" consecutive failures)")
+                    local_lines.append(f"❌ **{n}** — DOWN ({count} consecutive failures)")
+                    has_issues = True
                 else:
-                    # Soft warning — don't alert yet
-                    ok.append("**"+n+"** tunnel miss "+str(count)+"/"+str(STALL_TRIGGER_COUNT)+" (not yet alerting)")
+                    local_lines.append(f"⚠️ **{n}** — tunnel miss {count}/{STALL_TRIGGER_COUNT}")
+                    has_warnings = True
             else:
-                bad.append("**"+n+"** DOWN")
+                local_lines.append(f"❌ **{n}** — DOWN")
+                has_issues = True
 
     st["tunnel_failures"] = tunnel_failures
 
-    for name, status, restarts in docker_check():
-        prev = st.get("restarts",{}).get(name,0)
-        nr = restarts - prev if restarts >= prev else restarts
-        if status == "running" and nr == 0:
-            ok.append("**"+name+"** running (restarts: "+str(restarts)+")")
-        elif status == "running":
-            bad.append("**"+name+"** "+str(nr)+" new restart(s)")
+    for name, status, restarts, started_at in docker_check():
+        prev = st.get("restarts", {}).get(name, 0)
+        delta = restarts - prev if restarts >= prev else restarts
+        uptime = format_uptime(started_at)
+        st.setdefault("restarts", {})[name] = restarts
+
+        if status == "running" and delta == 0:
+            local_lines.append(f"✅ **{name}** — running | ↺ {restarts} restarts | up {uptime}")
+        elif status == "running" and delta > 0:
+            local_lines.append(f"⚠️ **{name}** — running | ↺ +{delta} new restart(s) ({restarts} total) | up {uptime}")
+            has_warnings = True
         else:
             fixed, msg = auto_repair(name, status)
             if fixed:
-                ok.append("**"+name+"** SELF-HEALED (was "+status+")")
-                bad.append("**"+name+"** was down - auto-restarted")
+                local_lines.append(f"⚠️ **{name}** — SELF-HEALED (was {status}) | up {format_uptime(None)}")
+                has_warnings = True
             else:
-                bad.append("**"+name+"** "+status)
-        st.setdefault("restarts",{})[name] = restarts
+                local_lines.append(f"❌ **{name}** — {status}")
+                has_issues = True
+
+    # ── VPS: 5.78.179.50 ────────────────────────────────────────────
+    vps_lines = []
+
+    for name, status, restarts, started_at in vps_docker_check():
+        prev = st.get("restarts_vps", {}).get(name, 0)
+        delta = restarts - prev if restarts >= prev else restarts
+        uptime = format_uptime(started_at)
+        st.setdefault("restarts_vps", {})[name] = restarts
+
+        if status == "running" and delta == 0:
+            vps_lines.append(f"✅ **{name}** — running | ↺ {restarts} restarts | up {uptime}")
+        elif status == "running" and delta > 0:
+            vps_lines.append(f"⚠️ **{name}** — running | ↺ +{delta} new restart(s) ({restarts} total) | up {uptime}")
+            has_warnings = True
+        else:
+            vps_lines.append(f"❌ **{name}** — {status}")
+            has_issues = True
+
+    # ── DISK ─────────────────────────────────────────────────────────
+    disk_lines = []
 
     for mount, pct in disk_check():
         if pct >= 90:
-            bad.append("Disk "+mount+" "+str(pct)+"% CRITICAL")
+            disk_lines.append(f"🔴 **Local {mount}** — {pct}% CRITICAL")
+            has_issues = True
         elif pct >= 80:
-            bad.append("Disk "+mount+" "+str(pct)+"% WARNING")
+            disk_lines.append(f"🟡 **Local {mount}** — {pct}% WARNING")
+            has_warnings = True
         elif pct >= 0:
-            ok.append("Disk "+mount+" "+str(pct)+"% used")
+            disk_lines.append(f"✅ **Local {mount}** — {pct}%")
 
-    if bad:
-        m = "**Issues:**\n"+"\n".join("x "+i for i in bad)
-        if ok: m += "\n\n**Healthy:**\n"+"\n".join("v "+i for i in ok)
-        discord(m, 0xff4444)
-        st["issues"] = bad
-        print("ALERT sent")
+    for mount, pct in vps_disk_check():
+        if pct >= 90:
+            disk_lines.append(f"🔴 **VPS {mount}** — {pct}% CRITICAL")
+            has_issues = True
+        elif pct >= 80:
+            disk_lines.append(f"🟡 **VPS {mount}** — {pct}% WARNING")
+            has_warnings = True
+        elif pct >= 0:
+            disk_lines.append(f"✅ **VPS {mount}** — {pct}%")
+
+    # ── STATUS & SEND ─────────────────────────────────────────────────
+    prev_had_issues = bool(st.get("issues"))
+
+    if has_issues:
+        color = 0xff4444
+        title = "🔴 MOTHER Health — Issues Detected"
+    elif has_warnings:
+        color = 0xffa500
+        title = "🟡 MOTHER Health — Warnings"
     else:
-        if st.get("issues") or "--verbose" in sys.argv:
-            m = "**All Systems Green**\n"+"\n".join("v "+i for i in ok)
-            discord(m, 0x00ff00)
-            st["issues"] = []
-            print("ALL CLEAR sent")
-        else:
-            print("All clear - silent")
+        color = 0x00cc44
+        title = "🟢 MOTHER Health — All Systems Green"
+
+    st["issues"] = "red" if has_issues else ("yellow" if has_warnings else "")
+
+    send = has_issues or has_warnings or prev_had_issues or "--verbose" in sys.argv
+
+    if send:
+        fields = []
+        if local_lines:
+            fields.append({"name": "📦  LOCAL — Cutter74", "value": "\n".join(local_lines), "inline": False})
+        if vps_lines:
+            fields.append({"name": "🌐  VPS — 5.78.179.50", "value": "\n".join(vps_lines), "inline": False})
+        if disk_lines:
+            fields.append({"name": "💾  Disk Usage", "value": "\n".join(disk_lines), "inline": False})
+        discord_rich(title, fields, color)
+        print("Report sent:", title)
+    else:
+        print("All clear — silent")
+
     save(st)
+
 
 def heartbeat():
     """Post a 30-minute alive ping to Discord"""
@@ -237,14 +408,14 @@ def heartbeat():
         for name, url, t in SERVICES:
             _, status, ms, _ = ping(name, url, t)
             if status == 200:
-                ok.append("**"+name+"** ✅ "+str(ms)+"ms")
-        for name, status, restarts in docker_check():
+                ok.append(f"**{name}** ✅ {ms}ms")
+        for name, status, restarts, started_at in docker_check():
             if status == "running":
-                ok.append("**"+name+"** ✅ running (restarts: "+str(restarts)+")")
+                ok.append(f"**{name}** ✅ running (restarts: {restarts})")
         for mount, pct in disk_check():
             if pct >= 0:
-                ok.append("Disk **"+mount+"** "+str(pct)+"%")
-        msg = "💓 **Mother Heartbeat** — All systems watched\n" + "\n".join("• "+i for i in ok)
+                ok.append(f"Disk **{mount}** {pct}%")
+        msg = "💓 **Mother Heartbeat** — All systems watched\n" + "\n".join("• " + i for i in ok)
         discord(msg, 0x5865f2)
         with open(STATE_HB, "w") as f:
             json.dump({"last": now}, f)
@@ -253,16 +424,13 @@ def heartbeat():
 
 def check_strategy_health():
     """Check AXIS_PMS health file for strategy stalls. Triggers n8n remediation on stall."""
-    from datetime import timezone
-    VPS = "root@5.78.179.50"
+    VPS = VPS_HOST
     HEALTH_FILE = "/home/node/.openclaw/workspace/memory/scan-health-axis_pms.json"
-
-    # Also check Options Bot local health file
     OPTIONS_HEALTH_FILE = "/home/guest74-linux/options_bot/scan-health-options.json"
+
     try:
         with open(OPTIONS_HEALTH_FILE, 'r') as f:
-            import json as _json
-            options_health = _json.load(f)
+            options_health = json.load(f)
         last_scan = options_health.get("last_scan_utc", "unknown")
         status = options_health.get("status", "unknown")
         if status.lower() not in ("ok", "healthy"):
@@ -271,8 +439,8 @@ def check_strategy_health():
         discord("OPTIONS BOT HEALTH - scan-health-options.json not found", 0xffa500)
     except Exception as e:
         discord(f"OPTIONS BOT HEALTH - Failed to read health file: {e}", 0xffa500)
-    NOW = datetime.now(timezone.utc)
 
+    NOW = datetime.now(timezone.utc)
     st = load()
     stall_counts = st.get("stall_counts", {})
 
@@ -283,7 +451,7 @@ def check_strategy_health():
             capture_output=True, text=True, timeout=30
         )
         if result.returncode != 0 or not result.stdout.strip():
-            discord("STRATEGY WATCHDOG - Could not read AXIS_PMS health file locally", 0xffa500)
+            discord("STRATEGY WATCHDOG - Could not read AXIS_PMS health file", 0xffa500)
             return
         health = json.loads(result.stdout.strip())
     except Exception as e:
@@ -330,7 +498,6 @@ def check_strategy_health():
         stall_detected = True
 
     if stall_detected:
-        # Increment consecutive stall counter
         stall_counts["axis_pms"] = stall_counts.get("axis_pms", 0) + 1
         count = stall_counts["axis_pms"]
 
@@ -340,7 +507,6 @@ def check_strategy_health():
         msg += " (RED:" + str(red_signals) + " YELLOW:" + str(yellow_signals) + ")"
         discord(msg, 0xff0000)
 
-        # Trigger n8n remediation after STALL_TRIGGER_COUNT consecutive stalls
         if count >= STALL_TRIGGER_COUNT:
             trigger_remediation(
                 trigger_type="strategy_stall",
@@ -353,16 +519,15 @@ def check_strategy_health():
                     "consecutive_stalls": count
                 }
             )
-            # Reset counter after triggering so we don't spam
             stall_counts["axis_pms"] = 0
 
         print("AXIS_PMS watchdog alert sent (stall #" + str(count) + ")")
     else:
-        # Clear stall counter on recovery
         if stall_counts.get("axis_pms", 0) > 0:
             print("AXIS_PMS recovered after " + str(stall_counts["axis_pms"]) + " stalls")
         stall_counts["axis_pms"] = 0
-        print("AXIS_PMS health OK - " + str(markets_scanned) + " markets, " + str(signals_found) + " signals, " + str(hours_since) + "h ago")
+        print("AXIS_PMS health OK - " + str(markets_scanned) + " markets, " +
+              str(signals_found) + " signals, " + str(hours_since) + "h ago")
 
     st["stall_counts"] = stall_counts
     save(st)
