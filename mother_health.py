@@ -12,7 +12,6 @@ SERVICES = [
 VPS_HOST = "root@5.78.179.50"
 VPS_CONTAINERS = [
     ("n8n VPS", VPS_HOST, "n8n-n8n-1"),
-    ("OpenClaw VPS", VPS_HOST, "repo-openclaw-gateway-1"),
 ]
 CONTAINERS = ["openclaw-openclaw-gateway-1"]
 STATE = os.path.expanduser("~/.openclaw/mother_health_state.json")
