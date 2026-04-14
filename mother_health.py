@@ -5,9 +5,7 @@ from datetime import datetime, timezone
 WEBHOOK = "https://discord.com/api/webhooks/1474871331626680522/jX3Js_uSqH-r-OGgNoWt1QrMSxyHqWoFxUqcEQx1zTnYon2MeJ-EsW19ghKxZi9RAaWS"
 N8N_REMEDIATION = "https://n8n.srv1242671.hstgr.cloud/webhook/mother-remediation"
 
-SERVICES = [
-    ("OpenClaw Local", "http://localhost:18789", 5),
-]
+SERVICES = []
 
 VPS_HOST = "root@5.78.179.50"
 VPS_CONTAINERS = [
@@ -51,6 +49,20 @@ def format_uptime(started_at_str):
             return f"{m}m"
     except:
         return "?"
+
+
+def openclaw_discord_check():
+    """Check OpenClaw health via docker exec doctor command. Returns True if Discord: ok found."""
+    try:
+        out = subprocess.run(
+            ["docker", "exec", "openclaw-openclaw-gateway-1", "node", "dist/index.js", "doctor"],
+            capture_output=True, timeout=30
+        )
+        decoded = out.stdout.decode("utf-8", errors="replace")
+return "Discord: ok" in decoded
+    except Exception as e:
+        print(f"[openclaw_discord_check] exception: {e}")
+        return False
 
 
 def docker_check():
@@ -299,6 +311,12 @@ def run():
 
     st["tunnel_failures"] = tunnel_failures
 
+    if openclaw_discord_check():
+        local_lines.append("✅ **OpenClaw Local** — Discord: ok")
+    else:
+        local_lines.append("❌ **OpenClaw Local** — Discord check failed")
+        has_issues = True
+
     for name, status, restarts, started_at in docker_check():
         prev = st.get("restarts", {}).get(name, 0)
         delta = restarts - prev if restarts >= prev else restarts
@@ -404,10 +422,10 @@ def heartbeat():
     now = time.time()
     if now - last >= 1800:  # 30 minutes
         ok = []
-        for name, url, t in SERVICES:
-            _, status, ms, _ = ping(name, url, t)
-            if status == 200:
-                ok.append(f"**{name}** ✅ {ms}ms")
+        if openclaw_discord_check():
+            ok.append("**OpenClaw Local** ✅ Discord: ok")
+        else:
+            ok.append("**OpenClaw Local** ❌ Discord check failed")
         for name, status, restarts, started_at in docker_check():
             if status == "running":
                 ok.append(f"**{name}** ✅ running (restarts: {restarts})")
