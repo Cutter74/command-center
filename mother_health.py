@@ -59,7 +59,7 @@ def openclaw_discord_check():
             capture_output=True, timeout=30
         )
         decoded = out.stdout.decode("utf-8", errors="replace")
-return "Discord: ok" in decoded
+        return "Discord: ok" in decoded
     except Exception as e:
         print(f"[openclaw_discord_check] exception: {e}")
         return False
@@ -553,7 +553,6 @@ def check_strategy_health():
 if __name__ == "__main__":
     tunnels = setup_tunnels()
     try:
-        heartbeat()
         run()
         check_strategy_health()
     finally:
