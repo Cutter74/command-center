@@ -527,7 +527,7 @@ def check_strategy_health():
         if count >= STALL_TRIGGER_COUNT:
             trigger_remediation(
                 trigger_type="strategy_stall",
-                service_name="repo-openclaw-gateway-1",
+                service_name=None,
                 alert_type="STRATEGY_STALL",
                 details={
                     "scan_status": scan_status,
