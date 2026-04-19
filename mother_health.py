@@ -540,8 +540,14 @@ def check_strategy_health():
 
         print("AXIS_PMS watchdog alert sent (stall #" + str(count) + ")")
     else:
-        if stall_counts.get("axis_pms", 0) > 0:
-            print("AXIS_PMS recovered after " + str(stall_counts["axis_pms"]) + " stalls")
+        prev_stall_count = stall_counts.get("axis_pms", 0)
+        if prev_stall_count > 0 and scan_status == "OK" and markets_scanned > 0:
+            hours_str = f"{hours_since:.1f}h" if isinstance(hours_since, float) else str(hours_since)
+            discord(
+                f"✅ AXIS_PMS RECOVERED — Scan healthy: {markets_scanned} markets, {hours_str} ago",
+                0x00ff00
+            )
+            print("AXIS_PMS recovered after " + str(prev_stall_count) + " stalls — recovery alert sent")
         stall_counts["axis_pms"] = 0
         print("AXIS_PMS health OK - " + str(markets_scanned) + " markets, " +
               str(signals_found) + " signals, " + str(hours_since) + "h ago")
@@ -550,10 +556,65 @@ def check_strategy_health():
     save(st)
 
 
+def is_weekday():
+    """Returns True if today is Monday–Friday."""
+    return datetime.now().weekday() < 5
+
+
+def check_ibgateway():
+    """Check IB Gateway systemd service. Skips alert during 5-min boot window at 07:00 PDT (14:00 UTC)."""
+    NOW_UTC = datetime.now(timezone.utc)
+    boot_today = NOW_UTC.replace(hour=14, minute=0, second=0, microsecond=0)
+    if abs((NOW_UTC - boot_today).total_seconds()) <= 300:
+        print("IB Gateway in boot window — skipping check")
+        return
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "ibgateway"],
+            capture_output=True, text=True, timeout=10
+        )
+        status = result.stdout.strip()
+        if status == "active":
+            print("IB Gateway: active")
+        else:
+            discord(f"⚠️ IB Gateway is {status} — expected active", 0xffa500)
+            print(f"IB Gateway alert: status={status}")
+    except Exception as e:
+        print(f"check_ibgateway error: {e}")
+
+
+def check_oracle():
+    """Check ORACLE delivery. Weekday-only."""
+    if not is_weekday():
+        print("ORACLE check — weekend, skipping")
+        return
+    # TODO: add ORACLE delivery check logic here
+
+
+def check_vcm_morning():
+    """Check VCM morning scan. Weekday-only."""
+    if not is_weekday():
+        print("VCM morning scan — weekend, skipping")
+        return
+    # TODO: add VCM morning scan check logic here
+
+
+def check_stock_momentum():
+    """Check Stock Momentum Bot. Weekday-only."""
+    if not is_weekday():
+        print("Stock Momentum Bot — weekend, skipping")
+        return
+    # TODO: add Stock Momentum Bot check logic here
+
+
 if __name__ == "__main__":
     tunnels = setup_tunnels()
     try:
         run()
         check_strategy_health()
+        check_ibgateway()
+        check_oracle()
+        check_vcm_morning()
+        check_stock_momentum()
     finally:
         teardown_tunnels(tunnels)
