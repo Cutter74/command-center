@@ -445,17 +445,20 @@ def check_strategy_health():
     HEALTH_FILE = "/home/node/.openclaw/workspace/memory/scan-health-axis_pms.json"
     OPTIONS_HEALTH_FILE = "/home/guest74-linux/options_bot/scan-health-options.json"
 
-    try:
-        with open(OPTIONS_HEALTH_FILE, 'r') as f:
-            options_health = json.load(f)
-        last_scan = options_health.get("last_scan_utc", "unknown")
-        status = options_health.get("status", "unknown")
-        if status.lower() not in ("ok", "healthy"):
-            discord(f"OPTIONS BOT HEALTH - Status: {status} | Last scan: {last_scan}", 0xffa500)
-    except FileNotFoundError:
-        discord("OPTIONS BOT HEALTH - scan-health-options.json not found", 0xffa500)
-    except Exception as e:
-        discord(f"OPTIONS BOT HEALTH - Failed to read health file: {e}", 0xffa500)
+    if is_weekday():
+        try:
+            with open(OPTIONS_HEALTH_FILE, 'r') as f:
+                options_health = json.load(f)
+            last_scan = options_health.get("last_scan_utc", "unknown")
+            status = options_health.get("status", "unknown")
+            if status.lower() not in ("ok", "healthy"):
+                discord(f"OPTIONS BOT HEALTH - Status: {status} | Last scan: {last_scan}", 0xffa500)
+        except FileNotFoundError:
+            discord("OPTIONS BOT HEALTH - scan-health-options.json not found", 0xffa500)
+        except Exception as e:
+            discord(f"OPTIONS BOT HEALTH - Failed to read health file: {e}", 0xffa500)
+    else:
+        print("Options Bot health check — ⏸️ Weekend — skipped")
 
     NOW = datetime.now(timezone.utc)
     st = load()
@@ -563,6 +566,9 @@ def is_weekday():
 
 def check_ibgateway():
     """Check IB Gateway systemd service. Skips alert during 5-min boot window at 07:00 PDT (14:00 UTC)."""
+    if not is_weekday():
+        print("IB Gateway check — ⏸️ Weekend — skipped")
+        return
     NOW_UTC = datetime.now(timezone.utc)
     boot_today = NOW_UTC.replace(hour=14, minute=0, second=0, microsecond=0)
     if abs((NOW_UTC - boot_today).total_seconds()) <= 300:
@@ -583,38 +589,11 @@ def check_ibgateway():
         print(f"check_ibgateway error: {e}")
 
 
-def check_oracle():
-    """Check ORACLE delivery. Weekday-only."""
-    if not is_weekday():
-        print("ORACLE check — weekend, skipping")
-        return
-    # TODO: add ORACLE delivery check logic here
-
-
-def check_vcm_morning():
-    """Check VCM morning scan. Weekday-only."""
-    if not is_weekday():
-        print("VCM morning scan — weekend, skipping")
-        return
-    # TODO: add VCM morning scan check logic here
-
-
-def check_stock_momentum():
-    """Check Stock Momentum Bot. Weekday-only."""
-    if not is_weekday():
-        print("Stock Momentum Bot — weekend, skipping")
-        return
-    # TODO: add Stock Momentum Bot check logic here
-
-
 if __name__ == "__main__":
     tunnels = setup_tunnels()
     try:
         run()
         check_strategy_health()
         check_ibgateway()
-        check_oracle()
-        check_vcm_morning()
-        check_stock_momentum()
     finally:
         teardown_tunnels(tunnels)
