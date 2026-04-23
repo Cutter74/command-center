@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import subprocess, json, urllib.request, urllib.error, time, os, sys
+import subprocess, json, urllib.request, urllib.error, time, os, sys, socket
 from datetime import datetime, timezone
 
 WEBHOOK = "https://discord.com/api/webhooks/1474871331626680522/jX3Js_uSqH-r-OGgNoWt1QrMSxyHqWoFxUqcEQx1zTnYon2MeJ-EsW19ghKxZi9RAaWS"
@@ -13,6 +13,7 @@ VPS_CONTAINERS = [
 ]
 CONTAINERS = ["openclaw-openclaw-gateway-1"]
 STATE = os.path.expanduser("~/.openclaw/mother_health_state.json")
+IB_GATEWAY_STATE = "/home/guest74-linux/mother-scripts/ib_gateway_state.json"
 
 # How many consecutive failures before triggering remediation
 STALL_TRIGGER_COUNT = 3
@@ -564,29 +565,62 @@ def is_weekday():
     return datetime.now().weekday() < 5
 
 
+def load_ibgw_state():
+    try:
+        with open(IB_GATEWAY_STATE) as f:
+            return json.load(f)
+    except:
+        return {"last_status": "UP", "alerted_down": False}
+
+
+def save_ibgw_state(state):
+    with open(IB_GATEWAY_STATE, "w") as f:
+        json.dump(state, f, indent=2)
+
+
 def check_ibgateway():
-    """Check IB Gateway systemd service. Skips alert during 5-min boot window at 07:00 PDT (14:00 UTC)."""
+    """Check IB Gateway port 7497 with state tracking for clean DOWN/RECOVERED alerts.
+
+    Boot window: daily restart cron fires at 12:00 UTC (6 AM CDT); skip checks for
+    10 minutes after to avoid false alarms while the gateway finishes starting up.
+    Alert logic: one DOWN alert per incident, one RECOVERED alert when port comes back.
+    """
     if not is_weekday():
         print("IB Gateway check — ⏸️ Weekend — skipped")
         return
+
     NOW_UTC = datetime.now(timezone.utc)
-    boot_today = NOW_UTC.replace(hour=14, minute=0, second=0, microsecond=0)
-    if abs((NOW_UTC - boot_today).total_seconds()) <= 300:
-        print("IB Gateway in boot window — skipping check")
+    boot_today = NOW_UTC.replace(hour=12, minute=0, second=0, microsecond=0)
+    secs_after_boot = (NOW_UTC - boot_today).total_seconds()
+    if 0 <= secs_after_boot <= 600:
+        print(f"IB Gateway in boot window ({int(secs_after_boot)}s after restart) — skipping check")
         return
+
+    is_up = False
     try:
-        result = subprocess.run(
-            ["systemctl", "is-active", "ibgateway"],
-            capture_output=True, text=True, timeout=10
-        )
-        status = result.stdout.strip()
-        if status == "active":
-            print("IB Gateway: active")
+        with socket.create_connection(("127.0.0.1", 7497), timeout=5):
+            is_up = True
+    except Exception:
+        is_up = False
+
+    state = load_ibgw_state()
+    last_status = state.get("last_status", "UP")
+    alerted_down = state.get("alerted_down", False)
+
+    if is_up:
+        if last_status == "DOWN":
+            discord("✅ IB Gateway RECOVERED — port 7497 healthy", 0x00cc44)
+            print("IB Gateway RECOVERED — recovery alert sent")
         else:
-            discord(f"⚠️ IB Gateway is {status} — expected active", 0xffa500)
-            print(f"IB Gateway alert: status={status}")
-    except Exception as e:
-        print(f"check_ibgateway error: {e}")
+            print("IB Gateway: port 7497 healthy")
+        save_ibgw_state({"last_status": "UP", "alerted_down": False})
+    else:
+        if not alerted_down:
+            discord("⚠️ IB Gateway DOWN — port 7497 not responding", 0xff4444)
+            print("IB Gateway DOWN — alert sent")
+        else:
+            print("IB Gateway still DOWN — suppressing duplicate alert")
+        save_ibgw_state({"last_status": "DOWN", "alerted_down": True})
 
 
 if __name__ == "__main__":
