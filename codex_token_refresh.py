@@ -140,8 +140,15 @@ def main():
     now_ms = int(time.time() * 1000)
     threshold_ms = REFRESH_THRESHOLD_HOURS * 3600 * 1000
 
+    ALLOWED_EMAILS = {"ljleander74@gmail.com"}
+
     for profile_id, profile in list(profiles.items()):
         if "openai-codex" not in profile_id.lower():
+            continue
+        profile_email = profile.get("email", "")
+        if profile_email and profile_email not in ALLOWED_EMAILS:
+            log(f"WARN SKIP {profile_id}: email {profile_email!r} not in whitelist, skipping")
+            skipped.append(f"{profile_id}: unauthorized email ({profile_email})")
             continue
         expires_ms = int(profile.get("expires", 0))
         remaining_hours = (expires_ms - now_ms) / (3600 * 1000)
