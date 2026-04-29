@@ -53,16 +53,23 @@ def format_uptime(started_at_str):
 
 
 def openclaw_discord_check():
-    """Check OpenClaw health via docker exec doctor command. Returns True if Discord: ok found."""
+    """Check OpenClaw liveness via HTTP GET to localhost:18789. Returns True on HTTP 200."""
     try:
-        out = subprocess.run(
-            ["docker", "exec", "openclaw-openclaw-gateway-1", "node", "dist/index.js", "doctor"],
-            capture_output=True, timeout=30
+        r = urllib.request.urlopen(
+            urllib.request.Request("http://localhost:18789/"),
+            timeout=10
         )
-        decoded = out.stdout.decode("utf-8", errors="replace")
-        return "Discord: ok" in decoded
+        result = r.status == 200
+        if "--verbose" in sys.argv:
+            print(f"[openclaw_discord_check] HTTP {r.status} → {'ok' if result else 'fail'}")
+        return result
+    except urllib.error.HTTPError as e:
+        if "--verbose" in sys.argv:
+            print(f"[openclaw_discord_check] HTTPError {e.code}")
+        return False
     except Exception as e:
-        print(f"[openclaw_discord_check] exception: {e}")
+        if "--verbose" in sys.argv:
+            print(f"[openclaw_discord_check] exception: {e}")
         return False
 
 
