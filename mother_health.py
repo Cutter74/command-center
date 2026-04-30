@@ -18,6 +18,11 @@ IB_GATEWAY_STATE = "/home/guest74-linux/mother-scripts/ib_gateway_state.json"
 # How many consecutive failures before triggering remediation
 STALL_TRIGGER_COUNT = 3
 
+OPENCLAW_BEARER = "ed3107607019a40fd7183eb23237f8ec48a5dd058e1a4a40091fd126cf4d242d"
+OPENCLAW_LATENCY_WARN_MS = 5000
+OPENCLAW_LATENCY_CRIT_MS = 12000
+OPENCLAW_LATENCY_TIMEOUT_S = 13
+
 
 def ping(name, url, t):
     try:
@@ -289,6 +294,65 @@ def teardown_tunnels(tunnels):
             pass
 
 
+def check_openclaw_latency():
+    """POST a minimal ping to the OpenClaw gateway and measure end-to-end latency.
+
+    GREEN  < 5 000 ms  — normal
+    YELLOW 5 000–12 000 ms — slow; Hetzner router will fall back to Sonnet
+    RED    > 12 000 ms or timeout — router fully on Sonnet fallback
+    Returns (status, latency_ms, embed_line).
+    """
+    url = "http://localhost:18789/v1/chat/completions"
+    payload = json.dumps({
+        "model": "openclaw",
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 5
+    }).encode()
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENCLAW_BEARER}",
+        },
+        method="POST"
+    )
+    start = time.time()
+    try:
+        urllib.request.urlopen(req, timeout=OPENCLAW_LATENCY_TIMEOUT_S)
+        latency_ms = round((time.time() - start) * 1000)
+    except Exception:
+        latency_ms = round((time.time() - start) * 1000)
+        status = "red"
+        line = f"❌ **OpenClaw Latency** — timeout ({latency_ms}ms) — LLMRoute fully on Sonnet fallback"
+        print(f"[openclaw_latency] {latency_ms}ms → RED (timeout)")
+        discord(
+            f"OpenClaw unreachable/too slow: {latency_ms}ms — LLMRoute fully on Sonnet fallback",
+            0xff4444
+        )
+        return status, latency_ms, line
+
+    if latency_ms < OPENCLAW_LATENCY_WARN_MS:
+        status = "green"
+        line = f"✅ **OpenClaw Latency** — {latency_ms}ms"
+    elif latency_ms < OPENCLAW_LATENCY_CRIT_MS:
+        status = "yellow"
+        line = f"⚠️ **OpenClaw Latency** — {latency_ms}ms (SLOW — Hetzner fallback to Sonnet)"
+        discord(
+            f"OpenClaw slow: {latency_ms}ms — Hetzner router will fallback to Sonnet",
+            0xffa500
+        )
+    else:
+        status = "red"
+        line = f"❌ **OpenClaw Latency** — {latency_ms}ms (CRITICAL — LLMRoute fully on Sonnet fallback)"
+        discord(
+            f"OpenClaw unreachable/too slow: {latency_ms}ms — LLMRoute fully on Sonnet fallback",
+            0xff4444
+        )
+
+    print(f"[openclaw_latency] {latency_ms}ms → {status.upper()}")
+    return status, latency_ms, line
+
+
 def run():
     st = load()
     tunnel_failures = st.get("tunnel_failures", {})
@@ -324,6 +388,13 @@ def run():
     else:
         local_lines.append("❌ **OpenClaw Local** — Discord check failed")
         has_issues = True
+
+    lat_status, _lat_ms, lat_line = check_openclaw_latency()
+    local_lines.append(lat_line)
+    if lat_status == "red":
+        has_issues = True
+    elif lat_status == "yellow":
+        has_warnings = True
 
     for name, status, restarts, started_at in docker_check():
         prev = st.get("restarts", {}).get(name, 0)
