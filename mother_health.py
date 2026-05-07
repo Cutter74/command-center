@@ -297,11 +297,12 @@ def teardown_tunnels(tunnels):
 def check_openclaw_latency():
     """POST a minimal ping to the Codex passthrough server and measure end-to-end latency.
 
-    GREEN  < 1 500 ms  — normal
-    YELLOW 1 500–3 000 ms — slow but acceptable
-    RED    > 3 000 ms or timeout — LLMRoute will fall back to Sonnet
+    GREEN  < 2000 ms  — normal
+    YELLOW 2000–10000 ms — slow but acceptable (single ping)
+    RED    timeout, OR current ping >10000ms, OR ≥3 of last 5 pings >3000ms
     Returns (status, latency_ms, embed_line).
     """
+    import re as _re
     url = "http://localhost:18791/v1/chat/completions"
     payload = json.dumps({
         "model": "openai-codex/gpt-5.4-mini",
@@ -331,25 +332,55 @@ def check_openclaw_latency():
         )
         return status, latency_ms, line
 
-    if latency_ms < OPENCLAW_LATENCY_WARN_MS:
-        status = "green"
-        line = f"✅ **Codex Passthrough** — {latency_ms}ms"
-    elif latency_ms < OPENCLAW_LATENCY_CRIT_MS:
-        status = "yellow"
-        line = f"⚠️ **Codex Passthrough** — {latency_ms}ms (SLOW — Hetzner fallback to Sonnet)"
-        discord(
-            f"Codex passthrough slow: {latency_ms}ms — Hetzner router will fallback to Sonnet",
-            0xffa500
-        )
-    else:
+    # Catastrophic single spike — immediate RED without history check
+    if latency_ms > 10000:
         status = "red"
         line = f"❌ **Codex Passthrough** — {latency_ms}ms (CRITICAL — LLMRoute fully on Sonnet fallback)"
+        print(f"[openclaw_latency] {latency_ms}ms → RED (catastrophic single-ping >10000ms)")
         discord(
             f"Codex passthrough unreachable/too slow: {latency_ms}ms — LLMRoute fully on Sonnet fallback",
             0xff4444
         )
+        return status, latency_ms, line
 
-    print(f"[openclaw_latency] {latency_ms}ms → {status.upper()}")
+    # N-of-M: pull last 4 readings from health.log + current = 5-ping window
+    health_log = os.path.expanduser("~/mother-scripts/health.log")
+    recent = []
+    try:
+        out = subprocess.run(
+            ["bash", "-c", f"grep 'openclaw_latency' '{health_log}' | tail -4"],
+            capture_output=True, text=True, timeout=5
+        )
+        for l in out.stdout.strip().splitlines():
+            m = _re.search(r"\[openclaw_latency\] (\d+)ms", l)
+            if m:
+                recent.append(int(m.group(1)))
+    except Exception:
+        pass
+    window = recent + [latency_ms]
+    slow_count = sum(1 for ms in window if ms > 3000)
+
+    if slow_count >= 3:
+        status = "red"
+        line = f"❌ **Codex Passthrough** — {latency_ms}ms ({slow_count}/{len(window)} slow — LLMRoute fully on Sonnet fallback)"
+        print(f"[openclaw_latency] {latency_ms}ms → RED ({slow_count}/{len(window)} pings >3000ms)")
+        discord(
+            f"Codex passthrough persistently slow: {latency_ms}ms ({slow_count} of last {len(window)} pings >3000ms) — LLMRoute fully on Sonnet fallback",
+            0xff4444
+        )
+    elif latency_ms < OPENCLAW_LATENCY_WARN_MS:
+        status = "green"
+        line = f"✅ **Codex Passthrough** — {latency_ms}ms"
+        print(f"[openclaw_latency] {latency_ms}ms → GREEN")
+    else:
+        status = "yellow"
+        line = f"⚠️ **Codex Passthrough** — {latency_ms}ms (SLOW — Hetzner fallback to Sonnet)"
+        print(f"[openclaw_latency] {latency_ms}ms → YELLOW (slow_count={slow_count}/{len(window)})")
+        discord(
+            f"Codex passthrough slow: {latency_ms}ms — Hetzner router will fallback to Sonnet",
+            0xffa500
+        )
+
     return status, latency_ms, line
 
 
