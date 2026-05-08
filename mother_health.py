@@ -14,6 +14,7 @@ VPS_CONTAINERS = [
 CONTAINERS = ["openclaw-openclaw-gateway-1"]
 STATE = os.path.expanduser("~/.openclaw/mother_health_state.json")
 IB_GATEWAY_STATE = "/home/guest74-linux/mother-scripts/ib_gateway_state.json"
+AXIS_RELAY_STATE = "/home/guest74-linux/mother-scripts/axis_relay_state.json"
 
 # How many consecutive failures before triggering remediation
 STALL_TRIGGER_COUNT = 3
@@ -732,11 +733,48 @@ def check_ibgateway():
         save_ibgw_state({"last_status": "DOWN", "alerted_down": True})
 
 
+
+def check_axis_relay():
+    """Check axis-relay on port 7373. State-tracked: one DOWN alert, one RECOVERED alert."""
+    is_up = False
+    try:
+        with socket.create_connection(("127.0.0.1", 7373), timeout=5):
+            is_up = True
+    except Exception:
+        is_up = False
+
+    try:
+        with open(AXIS_RELAY_STATE) as f:
+            state = json.load(f)
+    except Exception:
+        state = {"last_status": "UP", "alerted_down": False}
+
+    last_status = state.get("last_status", "UP")
+    alerted_down = state.get("alerted_down", False)
+
+    if is_up:
+        if last_status == "DOWN":
+            discord("\u2705 axis-relay RECOVERED \u2014 port 7373 healthy", 0x00cc44)
+            print("axis-relay RECOVERED \u2014 recovery alert sent")
+        else:
+            print("axis-relay: port 7373 healthy")
+        with open(AXIS_RELAY_STATE, "w") as f:
+            json.dump({"last_status": "UP", "alerted_down": False}, f)
+    else:
+        if not alerted_down:
+            discord("\u26a0\ufe0f axis-relay DOWN \u2014 port 7373 not responding", 0xff4444)
+            print("axis-relay DOWN \u2014 alert sent")
+        else:
+            print("axis-relay still DOWN \u2014 suppressing duplicate alert")
+        with open(AXIS_RELAY_STATE, "w") as f:
+            json.dump({"last_status": "DOWN", "alerted_down": True}, f)
+
 if __name__ == "__main__":
     tunnels = setup_tunnels()
     try:
         run()
         check_strategy_health()
         check_ibgateway()
+        check_axis_relay()
     finally:
         teardown_tunnels(tunnels)
