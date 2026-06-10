@@ -2,7 +2,7 @@
 import subprocess, json, urllib.request, urllib.error, time, os, sys, socket
 from datetime import datetime, timezone
 
-WEBHOOK = "https://discord.com/api/webhooks/1474871331626680522/jX3Js_uSqH-r-OGgNoWt1QrMSxyHqWoFxUqcEQx1zTnYon2MeJ-EsW19ghKxZi9RAaWS"
+WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL")
 N8N_REMEDIATION = "https://n8n.bulwarkai.net/webhook/mother-remediation"
 
 SERVICES = []
