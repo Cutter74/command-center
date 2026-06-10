@@ -3,7 +3,7 @@ import subprocess, json, urllib.request, urllib.error, time, os, sys, socket
 from datetime import datetime, timezone
 
 WEBHOOK = "https://discord.com/api/webhooks/1474871331626680522/jX3Js_uSqH-r-OGgNoWt1QrMSxyHqWoFxUqcEQx1zTnYon2MeJ-EsW19ghKxZi9RAaWS"
-N8N_REMEDIATION = "https://n8n.srv1242671.hstgr.cloud/webhook/mother-remediation"
+N8N_REMEDIATION = "https://n8n.bulwarkai.net/webhook/mother-remediation"
 
 SERVICES = []
 
@@ -300,15 +300,16 @@ def check_openclaw_latency():
 
     GREEN  < 2000 ms  — normal
     YELLOW 2000–10000 ms — slow but acceptable (single ping)
-    RED    timeout, OR current ping >10000ms, OR ≥3 of last 5 pings >3000ms
+    RED    connection refused/timeout, non-200, or empty/missing response content
+           → fires gateway_down remediation webhook on every genuine RED detection
     Returns (status, latency_ms, embed_line).
     """
     import re as _re
     url = "http://localhost:18791/v1/chat/completions"
     payload = json.dumps({
-        "model": "openai-codex/gpt-5.4-mini",
+        "model": "openclaw",
         "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 5
+        "max_tokens": 2
     }).encode()
     req = urllib.request.Request(
         url, data=payload,
@@ -318,33 +319,75 @@ def check_openclaw_latency():
         },
         method="POST"
     )
+
+    RED_MSG = (
+        "Codex passthrough (:18791) inference FAILED — endpoint not returning model content "
+        "(passthrough down, or its upstream Codex/gateway down or auth-dead). "
+        "NOTE: this is the passthrough + gateway’s own model chain, NOT LLMRoute — "
+        "Mother does not route through LLMRoute."
+    )
+
+    def _fire_gateway_down(probe_note):
+        """Fire remediation webhook for passthrough/gateway RED."""
+        try:
+            trigger_remediation(
+                trigger_type="gateway_down",
+                service_name="openclaw-openclaw-gateway-1",
+                alert_type="gateway_inference_failure",
+                details={"probe": probe_note}
+            )
+        except Exception as e:
+            print(f"[openclaw_latency] gateway_down webhook error: {e}")
+
     start = time.time()
+    http_status = None
+    content = None
+    error_note = None
+
     try:
-        urllib.request.urlopen(req, timeout=OPENCLAW_LATENCY_TIMEOUT_S)
+        resp = urllib.request.urlopen(req, timeout=10)
         latency_ms = round((time.time() - start) * 1000)
-    except Exception:
+        http_status = resp.status
+        try:
+            body = json.loads(resp.read().decode("utf-8", errors="replace"))
+            content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+        except Exception:
+            content = ""
+    except Exception as exc:
         latency_ms = round((time.time() - start) * 1000)
+        error_note = str(exc)[:120]
+
+    # ── Determine RED / YELLOW / GREEN ──────────────────────────────
+
+    if error_note is not None:
+        # Connection refused, timeout, non-HTTP error
         status = "red"
-        line = f"❌ **Codex Passthrough** — timeout ({latency_ms}ms) — LLMRoute fully on Sonnet fallback"
-        print(f"[openclaw_latency] {latency_ms}ms → RED (timeout)")
-        discord(
-            f"Codex passthrough unreachable/too slow: {latency_ms}ms — LLMRoute fully on Sonnet fallback",
-            0xff4444
-        )
+        probe_note = f"exception after {latency_ms}ms: {error_note}"
+        line = f"❌ **Codex Passthrough** — timeout/refused ({latency_ms}ms) — {RED_MSG}"
+        print(f"[openclaw_latency] {latency_ms}ms → RED (exception: {error_note})")
+        discord(f"❌ {RED_MSG} ({latency_ms}ms)", 0xff4444)
+        _fire_gateway_down(probe_note)
         return status, latency_ms, line
 
-    # Catastrophic single spike — immediate RED without history check
-    if latency_ms > 10000:
+    if http_status != 200:
         status = "red"
-        line = f"❌ **Codex Passthrough** — {latency_ms}ms (CRITICAL — LLMRoute fully on Sonnet fallback)"
-        print(f"[openclaw_latency] {latency_ms}ms → RED (catastrophic single-ping >10000ms)")
-        discord(
-            f"Codex passthrough unreachable/too slow: {latency_ms}ms — LLMRoute fully on Sonnet fallback",
-            0xff4444
-        )
+        probe_note = f"HTTP {http_status} after {latency_ms}ms"
+        line = f"❌ **Codex Passthrough** — HTTP {http_status} ({latency_ms}ms) — {RED_MSG}"
+        print(f"[openclaw_latency] {latency_ms}ms → RED (HTTP {http_status})")
+        discord(f"❌ {RED_MSG} (HTTP {http_status}, {latency_ms}ms)", 0xff4444)
+        _fire_gateway_down(probe_note)
         return status, latency_ms, line
 
-    # N-of-M: pull last 4 readings from health.log + current = 5-ping window
+    if not content:
+        status = "red"
+        probe_note = f"HTTP 200 but empty/missing choices[0].message.content after {latency_ms}ms"
+        line = f"❌ **Codex Passthrough** — empty content ({latency_ms}ms) — {RED_MSG}"
+        print(f"[openclaw_latency] {latency_ms}ms → RED (empty content)")
+        discord(f"❌ {RED_MSG} (empty content, {latency_ms}ms)", 0xff4444)
+        _fire_gateway_down(probe_note)
+        return status, latency_ms, line
+
+    # Real content returned — check latency bands using N-of-M window
     health_log = os.path.expanduser("~/mother-scripts/health.log")
     recent = []
     try:
@@ -363,12 +406,20 @@ def check_openclaw_latency():
 
     if slow_count >= 3:
         status = "red"
-        line = f"❌ **Codex Passthrough** — {latency_ms}ms ({slow_count}/{len(window)} slow — LLMRoute fully on Sonnet fallback)"
+        probe_note = (
+            f"{slow_count}/{len(window)} pings >3000ms, current {latency_ms}ms; "
+            "content present but persistently slow"
+        )
+        line = (
+            f"❌ **Codex Passthrough** — {latency_ms}ms "
+            f"({slow_count}/{len(window)} slow) — {RED_MSG}"
+        )
         print(f"[openclaw_latency] {latency_ms}ms → RED ({slow_count}/{len(window)} pings >3000ms)")
         discord(
-            f"Codex passthrough persistently slow: {latency_ms}ms ({slow_count} of last {len(window)} pings >3000ms) — LLMRoute fully on Sonnet fallback",
+            f"❌ {RED_MSG} (persistently slow: {latency_ms}ms, {slow_count}/{len(window)} >3000ms)",
             0xff4444
         )
+        _fire_gateway_down(probe_note)
     elif latency_ms < OPENCLAW_LATENCY_WARN_MS:
         status = "green"
         line = f"✅ **Codex Passthrough** — {latency_ms}ms"
