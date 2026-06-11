@@ -19,7 +19,7 @@ AXIS_RELAY_STATE = "/home/guest74-linux/mother-scripts/axis_relay_state.json"
 # How many consecutive failures before triggering remediation
 STALL_TRIGGER_COUNT = 3
 
-OPENCLAW_BEARER = "ed3107607019a40fd7183eb23237f8ec48a5dd058e1a4a40091fd126cf4d242d"
+OPENCLAW_BEARER = os.environ.get("OPENCLAW_BEARER_TOKEN")
 OPENCLAW_LATENCY_WARN_MS = 2000
 OPENCLAW_LATENCY_CRIT_MS = 5000
 OPENCLAW_LATENCY_TIMEOUT_S = 8
