@@ -11,7 +11,7 @@
 - Mother openclaw.json: /home/guest74-linux/.openclaw/openclaw.json
 - Skywise DB: psql postgresql://skywise:skywise_pass@localhost:5432/skywise_db
 - IB Gateway: port 7497 (paper trading), requires Xvfb :1 for headless operation
-- LLMRoute tiers: T0 regex bypass | T1 DeepSeek V3 (deepseek-chat) | T2 Gemini 2.5 Flash | T3 OpenClaw/GPT-5.4 OAuth | T4 Sonnet 4.6 | Opus hard-blocked. Mother + MindForge do NOT route through LLMRoute.
+- Ollama: localhost:11434, Qwen 2.5 3B model
 
 ## Key Rules
 - Mother runs INSIDE Docker — she cannot run host commands directly
